@@ -2,6 +2,8 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
 import os
+import threading
+import time
 
 app = Flask(__name__)
 CORS(app)
@@ -9,32 +11,63 @@ CORS(app)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-@app.route("/send-message", methods=["POST"])
-def send_message():
-    data = request.json
-    customer_name = data.get("name", "Anónimo")
-    customer_email = data.get("email", "Sin email")
-    message = data.get("message", "")
+# Almacena los chats activos: {session_id: [mensajes]}
+active_chats = {}
+# Almacena respuestas pendientes: {session_id: [respuestas]}
+pending_responses = {}
 
-    text = f"""
-💬 *Nuevo mensaje de chat*
-
-👤 *Nombre:* {customer_name}
-📧 *Email:* {customer_email}
-📝 *Mensaje:* {message}
-    """
-
-    telegram_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    response = requests.post(telegram_url, json={
+def send_telegram(text):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    requests.post(url, json={
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
         "parse_mode": "Markdown"
     })
 
-    if response.status_code == 200:
-        return jsonify({"success": True}), 200
-    else:
-        return jsonify({"success": False}), 500
+@app.route("/send-message", methods=["POST"])
+def send_message():
+    data = request.json
+    session_id = data.get("session_id", "")
+    customer_name = data.get("name", "Anónimo")
+    customer_phone = data.get("phone", "Sin teléfono")
+    message = data.get("message", "")
+
+    if session_id not in active_chats:
+        active_chats[session_id] = []
+        pending_responses[session_id] = []
+        # Primer mensaje: mostrar info del cliente
+        send_telegram(f"💬 *Nuevo chat iniciado*\n👤 *Nombre:* {customer_name}\n📞 *Teléfono:* {customer_phone}\n🔑 *ID:* `{session_id}`\n\n_Para responder escribe:_ `{session_id}: tu mensaje`")
+
+    active_chats[session_id].append({"role": "customer", "text": message})
+    send_telegram(f"👤 *{customer_name}* `[{session_id}]`:\n{message}")
+
+    return jsonify({"success": True}), 200
+
+@app.route("/get-responses", methods=["GET"])
+def get_responses():
+    session_id = request.args.get("session_id", "")
+    if session_id in pending_responses and pending_responses[session_id]:
+        responses = pending_responses[session_id].copy()
+        pending_responses[session_id] = []
+        return jsonify({"responses": responses}), 200
+    return jsonify({"responses": []}), 200
+
+@app.route("/webhook", methods=["POST"])
+def telegram_webhook():
+    data = request.json
+    if "message" in data:
+        text = data["message"].get("text", "")
+        # Formato esperado: "SESSION_ID: mensaje"
+        if ": " in text:
+            parts = text.split(": ", 1)
+            session_id = parts[0].strip()
+            response_text = parts[1].strip()
+            if session_id in pending_responses:
+                pending_responses[session_id].append(response_text)
+                send_telegram(f"✅ Respuesta enviada a `{session_id}`")
+            else:
+                send_telegram(f"⚠️ No se encontró la sesión `{session_id}`")
+    return jsonify({"ok": True}), 200
 
 @app.route("/", methods=["GET"])
 def home():
